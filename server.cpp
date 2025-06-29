@@ -50,6 +50,8 @@ atomic<bool> server_running{true};
 string CALC_SHA256(const string& input);
 ofstream log_file;
 
+SOCKET get_socket_by_username(const string& username);
+
 void broadcast_message(const string& message, SOCKET sender_socket) {
     // Ensure the mutex is not locked before acquiring it
     {
@@ -157,6 +159,34 @@ void handle_client(SOCKET client_socket, const string& client_ip) {
                             string status_msg = "Server: " + old_username + " is now known as " + new_username;
                             cout << status_msg << endl;
                             broadcast_message(status_msg, client_socket);
+                        }
+                        else if (msg_part.rfind("/dm ", 0) == 0 || msg_part.rfind("/pm ", 0) == 0) {
+                            // Format: /dm username message
+                            istringstream iss(msg_part);
+                            string cmd, target_username, dm_message;
+                            iss >> cmd >> target_username;
+                            getline(iss, dm_message);
+                            dm_message = dm_message.substr(1); // Remove leading space
+
+                            SOCKET target_socket = get_socket_by_username(target_username);
+                            if (target_socket != INVALID_SOCKET) {
+                                string sender_username;
+                                {
+                                    lock_guard<mutex> lock(clients_mutex);
+                                    sender_username = client_usernames[client_socket];
+                                }
+                                string dm_text = "[DM from " + sender_username + "]: " + dm_message;
+                                string dm_with_hash = dm_text + "|" + CALC_SHA256(dm_text) + "\n";
+                                send(target_socket, dm_with_hash.c_str(), static_cast<int>(dm_with_hash.length()), 0);
+
+                                // Optional: notify sender that DM was sent
+                                string confirm = "[DM to " + target_username + "]: " + dm_message;
+                                string confirm_with_hash = confirm + "|" + CALC_SHA256(confirm) + "\n";
+                                send(client_socket, confirm_with_hash.c_str(), static_cast<int>(confirm_with_hash.length()), 0);
+                            } else {
+                                string err = "Server: User '" + target_username + "' not found.\n";
+                                send(client_socket, err.c_str(), static_cast<int>(err.length()), 0);
+                            }
                         }
                         // Handle regular chat messages
                         else {
@@ -277,6 +307,26 @@ void console_command_thread() {
             cout << "User '" << username << "' has been unbanned." << endl;
         }
     }
+}
+
+bool username_exists(const string& username) {
+    lock_guard<mutex> lock(clients_mutex);
+    for (const auto& pair : client_usernames) {
+        if (pair.second == username) {
+            return true;
+        }
+    }
+    return false;
+}
+
+SOCKET get_socket_by_username(const string& username) {
+    lock_guard<mutex> lock(clients_mutex);
+    for (const auto& pair : client_usernames) {
+        if (pair.second == username) {
+            return pair.first;
+        }
+    }
+    return INVALID_SOCKET;
 }
 
 int main() {
