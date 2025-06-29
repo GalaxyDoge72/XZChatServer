@@ -1,4 +1,4 @@
-The server software for [XZChat](https://github.com/GalaxyDoge72/XZChat)
+The server software for [XZChat](https://github.com/GalaxyDoge72/XZChat), a TCP chatting client.
 
 Requires OpenSSL.
 
