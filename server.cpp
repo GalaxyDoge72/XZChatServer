@@ -32,7 +32,7 @@ const int RECV_BUFFER_SIZE = 4096; // Standard buffer size for receiving chunks
 
 const string IMAGE_PREFIX = "IMAGE_DATA:";
 
-// Unused so far, remind me to do this later... //
+
 const string FILE_PREFIX = "FILE_DATA:";
 
 
@@ -129,7 +129,19 @@ void handle_client(SOCKET client_socket, const string& client_ip) {
                     cout << "[" << sender_username << " from " << client_ip << "] Relaying image data." << endl;
                     // Relay the raw image packet as-is to other clients //
                     relay_raw_packet(message, client_socket);
-                } else {
+
+                } 
+                else if (message.rfind(FILE_PREFIX, 0) == 0) {
+                    string sender_username;
+                    {
+                        lock_guard<mutex> lock(clients_mutex);
+                        sender_username = client_usernames[client_socket];
+                    }
+                    cout << sender_username << " sent a file." << endl;
+                    relay_raw_packet(message, client_socket);
+                }
+
+                else {
                     size_t sep = message.rfind('|');
                     if (sep != string::npos && sep < message.length() - 1) {
                         string msg_part = message.substr(0, sep);
