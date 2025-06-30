@@ -18,6 +18,7 @@
 #include <atomic>
 #include <fstream>
 #include <ctime>
+#include <sstream>
 // God fucking help me if I need any more libraries //
 // I wonder how many of these actually end up getting used //
 
@@ -34,6 +35,9 @@ const string IMAGE_PREFIX = "IMAGE_DATA:";
 
 
 const string FILE_PREFIX = "FILE_DATA:";
+
+int MAX_FILE_MESSAGE_SIZE = 2000 * 1024; // 2000 KB (2MB)
+string MAX_FILE_MESSAGE_STR = "MAX_FILE_SIZE:" + to_string(MAX_FILE_MESSAGE_SIZE);
 
 
 // Shared resources protected by a mutex
@@ -92,6 +96,7 @@ void handle_client(SOCKET client_socket, const string& client_ip) {
     string welcome_msg = "Welcome to the server, " + client_ip + "!";
     string welcome_msg_with_hash = welcome_msg + "|" + CALC_SHA256(welcome_msg) + "\n";
     send(client_socket, welcome_msg_with_hash.c_str(), static_cast<int>(welcome_msg_with_hash.length()), 0);
+    send(client_socket, MAX_FILE_MESSAGE_STR.c_str(), static_cast<int>(MAX_FILE_MESSAGE_STR.length()), 0);
 
     auto recv_buffer = make_unique<char[]>(RECV_BUFFER_SIZE);
     string accumulated_data;
@@ -317,6 +322,14 @@ void console_command_thread() {
             lock_guard<mutex> lock(clients_mutex);
             banned_usernames.erase(username);
             cout << "User '" << username << "' has been unbanned." << endl;
+        }
+        else if (line.rfind("/maxfilesize ") == 0) {
+            int newFileSize;
+            istringstream(line.substr(9)) >> newFileSize;
+            MAX_FILE_MESSAGE_SIZE = newFileSize * 1024;
+
+            string fileMessage = "MAX_FILE_SIZE:" + MAX_FILE_MESSAGE_SIZE;
+
         }
     }
 }
