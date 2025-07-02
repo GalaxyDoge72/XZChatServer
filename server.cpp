@@ -293,6 +293,13 @@ string CALC_SHA256(const string& input) {
     return ss.str();
 }
 
+void send_to_all_clients(const string& message) {
+    lock_guard<mutex> lock(clients_mutex);
+    for (SOCKET client_socket : clients) {
+        send(client_socket, message.c_str(), static_cast<int>(message.length()), 0);
+    }
+}
+
 // Console command thread, so server hosts can enter console commands locally. //
 // It's also here because I cannot be fucked figuring out how to do client permissions properly. //
 void console_command_thread() {
@@ -325,11 +332,12 @@ void console_command_thread() {
         }
         else if (line.rfind("/maxfilesize ") == 0) {
             int newFileSize;
-            istringstream(line.substr(9)) >> newFileSize;
+            istringstream(line.substr(13)) >> newFileSize;
             MAX_FILE_MESSAGE_SIZE = newFileSize * 1024;
 
-            string fileMessage = "MAX_FILE_SIZE:" + MAX_FILE_MESSAGE_SIZE;
-
+            string fileMessage = "MAX_FILE_SIZE:" + to_string(MAX_FILE_MESSAGE_SIZE);
+			string fileMessageWithHash = fileMessage + "|" + CALC_SHA256(fileMessage);
+            send_to_all_clients(fileMessageWithHash);
         }
     }
 }
