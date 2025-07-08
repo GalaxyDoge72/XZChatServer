@@ -18,7 +18,6 @@
 #include <atomic>
 #include <fstream>
 #include <ctime>
-#include <sstream>
 #include <typeinfo>
 // God fucking help me if I need any more libraries //
 // I wonder how many of these actually end up getting used //
@@ -46,12 +45,14 @@ string MAX_FILE_MESSAGE_STR = "MAX_FILE_SIZE:" + to_string(MAX_FILE_MESSAGE_SIZE
 // Shared resources protected by a mutex
 vector<SOCKET> clients;
 map<SOCKET, string> client_usernames;
+unordered_map<SOCKET, string> client_ips;
 mutex clients_mutex;
 
 unordered_map<SOCKET, chrono::steady_clock::time_point> last_message_time;
 const int MIN_SECONDS_BETWEEN_MESSAGES = 1; // 1 second cooldown
 
 set<string> banned_usernames;
+set<string> bannedIPs;
 atomic<bool> server_running{true};
 
 string CALC_SHA256(const string& input);
@@ -92,6 +93,7 @@ void handle_client(SOCKET client_socket, const string& client_ip) {
         lock_guard<mutex> lock(clients_mutex);
         clients.push_back(client_socket);
         client_usernames[client_socket] = "Anonymous";
+        client_ips[client_socket] = client_ip; // Store the client's IP 
         last_message_time[client_socket] = chrono::steady_clock::now() - chrono::seconds(MIN_SECONDS_BETWEEN_MESSAGES);
     }
 
@@ -252,12 +254,15 @@ void handle_client(SOCKET client_socket, const string& client_ip) {
 
     // Handle client disconnection
     string disconnected_username;
+    string disconnected_ip; // Add this
     {
         lock_guard<mutex> lock(clients_mutex);
         disconnected_username = client_usernames[client_socket];
+        disconnected_ip = client_ips[client_socket]; // Get the IP
         // Remove client from lists //
         clients.erase(remove(clients.begin(), clients.end(), client_socket), clients.end());
         client_usernames.erase(client_socket);
+        client_ips.erase(client_socket); // Erase the IP
         last_message_time.erase(client_socket);
     }
 
@@ -310,6 +315,8 @@ void shutdownServer(const int time) {
     exit(5);
 }
 
+// Console command thread, so server hosts can enter console commands locally. //
+// It's also here because I cannot be fucked figuring out how to do client permissions properly. //
 void console_command_thread() {
     string line;
     while (server_running) {
@@ -334,6 +341,72 @@ void console_command_thread() {
             }
             cout << "User '" << username << "' has been banned." << endl;
         }
+        else if (line.rfind("/banIP ", 0) == 0) {
+            string target_username = line.substr(7); // Extract username
+
+            string ip_to_ban;
+            SOCKET target_socket = INVALID_SOCKET;
+
+            // Find the socket and IP associated with the username
+            {
+                lock_guard<mutex> lock(clients_mutex);
+                for (const auto& pair : client_usernames) {
+                    if (pair.second == target_username) {
+                        target_socket = pair.first;
+                        // Use client_ips map to get the IP from the socket
+                        if (client_ips.count(target_socket)) {
+                            ip_to_ban = client_ips[target_socket];
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if (!ip_to_ban.empty()) {
+                {
+                    lock_guard<mutex> lock(clients_mutex);
+                    bannedIPs.insert(ip_to_ban);
+                    cout << "IP '" << ip_to_ban << "' (associated with '" << target_username << "') has been banned." << endl;
+
+                    // Disconnect all clients with this banned IP
+                    // Iterate with a temporary copy or use a while loop with erase for safe modification
+                    vector<SOCKET> sockets_to_disconnect;
+                    for (const auto& pair : client_ips) {
+                        if (pair.second == ip_to_ban) {
+                            sockets_to_disconnect.push_back(pair.first);
+                        }
+                    }
+
+                    for (SOCKET sock_to_disconnect : sockets_to_disconnect) {
+                        string msg = "Server: Your IP has been banned.\n";
+                        send(sock_to_disconnect, msg.c_str(), static_cast<int>(msg.length()), 0);
+                        closesocket(sock_to_disconnect);
+
+                        // Remove from all relevant maps and vectors
+                        clients.erase(remove(clients.begin(), clients.end(), sock_to_disconnect), clients.end());
+                        client_usernames.erase(sock_to_disconnect);
+                        client_ips.erase(sock_to_disconnect);
+                        last_message_time.erase(sock_to_disconnect);
+                    }
+                }
+            }
+            else {
+                cout << "Error: User '" << target_username << "' not found or no associated IP." << endl;
+            }
+        }
+
+        else if (line.rfind("/unbanIP ", 0) == 0) {
+            string ip_to_unban = line.substr(9); // "/unbanIP " is 9 characters
+            lock_guard<mutex> lock(clients_mutex);
+            if (bannedIPs.count(ip_to_unban)) {
+                bannedIPs.erase(ip_to_unban);
+                cout << "IP '" << ip_to_unban << "' has been unbanned." << endl;
+            }
+            else {
+                cout << "IP '" << ip_to_unban << "' was not found in the banned list." << endl;
+            }
+        }
+
         // Syntax: "/unban username" //
         else if (line.rfind("/unban ", 0) == 0) {
             string username = line.substr(7);
@@ -359,7 +432,6 @@ void console_command_thread() {
             string shutdownMessage = "Server: Server will shutdown in " + to_string(shutdownTime) + " seconds.";
             string shutdownMessageWH = shutdownMessage + "|" + CALC_SHA256(shutdownMessage);
             send_to_all_clients(shutdownMessageWH);
-
             thread t(shutdownServer, shutdownTime);
             t.detach();  // Make sure the thread runs independently
         }
@@ -432,17 +504,29 @@ int main() {
         int client_addr_len = sizeof(client_addr);
         SOCKET new_socket = accept(server_fd, (struct sockaddr*)&client_addr, &client_addr_len);
         if (new_socket == INVALID_SOCKET) {
-            // I genuinely do not know how this could happen but if something breaks, it's here. //
             cerr << "Accept failed: " << WSAGetLastError() << endl;
             continue;
         }
 
-        char client_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
+        char client_ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip_str, INET_ADDRSTRLEN);
+        string client_ip = client_ip_str; // Convert to string for easier use with set
+
+        // Check if the connecting IP is banned
+        {
+            lock_guard<mutex> lock(clients_mutex);
+            if (bannedIPs.count(client_ip)) {
+                string ban_message = "Server: Your IP address is banned.\n";
+                send(new_socket, ban_message.c_str(), static_cast<int>(ban_message.length()), 0);
+                closesocket(new_socket);
+                cout << "Rejected connection from banned IP: " << client_ip << endl;
+                continue; // Go back to accepting new connections
+            }
+        }
 
         cout << "New connection from " << client_ip << endl;
 
-        thread client_thread(handle_client, new_socket, string(client_ip));
+        thread client_thread(handle_client, new_socket, client_ip); // Pass client_ip as string
         client_thread.detach();
     }
 
