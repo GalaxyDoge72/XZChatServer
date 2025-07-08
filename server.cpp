@@ -19,10 +19,12 @@
 #include <fstream>
 #include <ctime>
 #include <sstream>
+#include <typeinfo>
 // God fucking help me if I need any more libraries //
 // I wonder how many of these actually end up getting used //
 
 using namespace std;
+using namespace std::chrono;
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "libcrypto.lib")
@@ -38,6 +40,7 @@ const string FILE_PREFIX = "FILE_DATA:";
 
 int MAX_FILE_MESSAGE_SIZE = 2000 * 1024; // 2000 KB (2MB)
 string MAX_FILE_MESSAGE_STR = "MAX_FILE_SIZE:" + to_string(MAX_FILE_MESSAGE_SIZE);
+
 
 
 // Shared resources protected by a mutex
@@ -96,7 +99,8 @@ void handle_client(SOCKET client_socket, const string& client_ip) {
     string welcome_msg = "Welcome to the server, " + client_ip + "!";
     string welcome_msg_with_hash = welcome_msg + "|" + CALC_SHA256(welcome_msg) + "\n";
     send(client_socket, welcome_msg_with_hash.c_str(), static_cast<int>(welcome_msg_with_hash.length()), 0);
-    send(client_socket, MAX_FILE_MESSAGE_STR.c_str(), static_cast<int>(MAX_FILE_MESSAGE_STR.length()), 0);
+    string max_file_msg_with_hash = MAX_FILE_MESSAGE_STR + "|" + CALC_SHA256(MAX_FILE_MESSAGE_STR) + "\n";
+    send(client_socket, max_file_msg_with_hash.c_str(), static_cast<int>(max_file_msg_with_hash.length()), 0);
 
     auto recv_buffer = make_unique<char[]>(RECV_BUFFER_SIZE);
     string accumulated_data;
@@ -295,19 +299,24 @@ string CALC_SHA256(const string& input) {
 
 void send_to_all_clients(const string& message) {
     lock_guard<mutex> lock(clients_mutex);
+    string message_with_newline = message + "\n"; // Append newline
     for (SOCKET client_socket : clients) {
-        send(client_socket, message.c_str(), static_cast<int>(message.length()), 0);
+        send(client_socket, message_with_newline.c_str(), static_cast<int>(message_with_newline.length()), 0);
     }
 }
 
-// Console command thread, so server hosts can enter console commands locally. //
-// It's also here because I cannot be fucked figuring out how to do client permissions properly. //
+void shutdownServer(const int time) {
+    this_thread::sleep_for(chrono::seconds(time));
+    exit(5);
+}
+
 void console_command_thread() {
     string line;
     while (server_running) {
         getline(cin, line);
+        // Syntax: "/ban username" //
         if (line.rfind("/ban ", 0) == 0) {
-            string username = line.substr(5);
+            string username = line.substr(7);
             {
                 lock_guard<mutex> lock(clients_mutex);
                 banned_usernames.insert(username);
@@ -324,20 +333,35 @@ void console_command_thread() {
                 }
             }
             cout << "User '" << username << "' has been banned." << endl;
-        } else if (line.rfind("/unban ", 0) == 0) {
+        }
+        // Syntax: "/unban username" //
+        else if (line.rfind("/unban ", 0) == 0) {
             string username = line.substr(7);
             lock_guard<mutex> lock(clients_mutex);
             banned_usernames.erase(username);
             cout << "User '" << username << "' has been unbanned." << endl;
         }
+        // Syntax: "/maxfilesize MB" //
         else if (line.rfind("/maxfilesize ") == 0) {
             int newFileSize;
             istringstream(line.substr(13)) >> newFileSize;
             MAX_FILE_MESSAGE_SIZE = newFileSize * 1024;
 
-            string fileMessage = "MAX_FILE_SIZE:" + to_string(MAX_FILE_MESSAGE_SIZE);
-			string fileMessageWithHash = fileMessage + "|" + CALC_SHA256(fileMessage);
-            send_to_all_clients(fileMessageWithHash);
+            string fileMessage = "NEW_MAX_FILE_SIZE:" + to_string(MAX_FILE_MESSAGE_SIZE);
+			string fileMessageWH = fileMessage + "|" + CALC_SHA256(fileMessage);
+            send_to_all_clients(fileMessageWH);
+        }
+        // Syntax: "/shutdown timeTillShutdown" //
+        else if (line.rfind("/shutdown ", 0) == 0) {
+            int shutdownTime;
+            istringstream(line.substr(10)) >> shutdownTime;  // "/shutdown " is 10 characters
+
+            string shutdownMessage = "Server: Server will shutdown in " + to_string(shutdownTime) + " seconds.";
+            string shutdownMessageWH = shutdownMessage + "|" + CALC_SHA256(shutdownMessage);
+            send_to_all_clients(shutdownMessageWH);
+
+            thread t(shutdownServer, shutdownTime);
+            t.detach();  // Make sure the thread runs independently
         }
     }
 }
@@ -363,6 +387,7 @@ SOCKET get_socket_by_username(const string& username) {
 }
 
 int main() {
+    cout << MAX_FILE_MESSAGE_STR << endl;
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         // Pretty sure this shouldn't happen, but it might. //
